@@ -1,0 +1,82 @@
+------------ Options -------------
+experiment_name: train_big_data_2_newspaper_data_resnet_straug+old_aug
+train_data: ['/data1/ocr_data/recognition/arm_text_font/sentence/lmdb_big_data_2/train/', '/data1/ocr_data/recognition/arm_text_font/sentence/lmdb_newspaper_700k/']
+valid_data: /data1/ocr_data/recognition/arm_text_font/sentence/lmdb_real_test_2/
+manualSeed: 1111
+workers: 20
+batch_size: 256
+num_iter: 300000
+valInterval: 1000
+continue_model: 
+adam: False
+lr: 1
+beta1: 0.9
+rho: 0.95
+eps: 1e-08
+grad_clip: 5
+select_data: MJ-ST
+batch_ratio: 0.5-0.5
+total_data_usage_ratio: 1.0
+batch_max_length: 25
+imgH: 64
+imgW: 200
+rgb: False
+character: 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzԱԲԳԴԵԶԷԸԹԺԻԼԽԾԿՀՁՂՃՄՅՆՇՈՉՊՋՌՍՎՏՐՑՒՓՔՕՖաբգդեզէըթժիլխծկհձղճմյնշոչպջռսվտրցւփքօֆևАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"#$%&'()*+,-./:;<=>?@[\]_{|}~©«®°±»×՛՜՝՞֏¿!― 
+sensitive: True
+PAD: True
+data_filtering_off: False
+Transformation: None
+FeatureExtraction: ResNet
+SequenceModeling: BiLSTM
+Prediction: Attn
+num_fiducial: 20
+input_channel: 1
+output_channel: 512
+hidden_size: 256
+saved_models: ./saved_models
+change_pred: False
+num_gpu: 1
+device: cuda
+num_class: 252
+---------------------------------------
+------------ Options -------------
+experiment_name: train_big_data_2_newspaper_data_resnet_straug+old_aug
+train_data: ['/data1/ocr_data/recognition/arm_text_font/sentence/lmdb_big_data_2/train/', '/data1/ocr_data/recognition/arm_text_font/sentence/lmdb_newspaper_700k/']
+valid_data: /data1/ocr_data/recognition/arm_text_font/sentence/lmdb_real_test_nla/
+manualSeed: 1111
+workers: 20
+batch_size: 256
+num_iter: 300000
+valInterval: 1000
+continue_model: 
+adam: False
+lr: 1
+beta1: 0.9
+rho: 0.95
+eps: 1e-08
+grad_clip: 5
+select_data: MJ-ST
+batch_ratio: 0.5-0.5
+total_data_usage_ratio: 1.0
+batch_max_length: 25
+imgH: 64
+imgW: 200
+rgb: False
+character: 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzԱԲԳԴԵԶԷԸԹԺԻԼԽԾԿՀՁՂՃՄՅՆՇՈՉՊՋՌՍՎՏՐՑՒՓՔՕՖաբգդեզէըթժիլխծկհձղճմյնշոչպջռսվտրցւփքօֆևАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"#$%&'()*+,-./:;<=>?@[\]_{|}~©«®°±»×՛՜՝՞֏¿!― 
+sensitive: True
+PAD: True
+data_filtering_off: False
+Transformation: None
+FeatureExtraction: ResNet
+SequenceModeling: BiLSTM
+Prediction: Attn
+num_fiducial: 20
+input_channel: 1
+output_channel: 512
+hidden_size: 256
+saved_models: ./saved_models
+change_pred: False
+num_gpu: 1
+device: cuda
+num_class: 252
+---------------------------------------

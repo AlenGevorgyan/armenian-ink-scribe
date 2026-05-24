@@ -1,30 +1,49 @@
 """
 FastAPI service for Armenian cursive OCR.
-- /detect      : YOLOv8 word-level bounding boxes
-- /recognize   : CRNN single-word transcription
-- /ocr         : full pipeline (detect -> crop -> recognize -> stitch)
+Uses the armenian-ocr module (CRAFT detection + ResNet-BiLSTM-Attn recognition).
+
+Endpoints:
+- /detect      : CRAFT word-level bounding boxes
+- /recognize   : Single-word recognition
+- /ocr         : Full pipeline (detect -> crop -> recognize -> stitch)
 - /ocr/correct : OCR + LLM grammar correction (JSON response)
 - /ocr/export  : OCR + LLM correction + smart file download (XLSX/CSV/PDF/TXT)
 """
 import io
 import logging
 import os
-import tempfile
+import sys
 from typing import List, Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-from huggingface_hub import hf_hub_download
-from PIL import Image, ImageOps
-from ultralytics import YOLO
 
-from llm_processor import correct_and_classify, OPENROUTER_API_KEY
-from file_export import (
+# ---------------------------------------------------------------------------
+# Monkey-patch: newer torchvision removed `model_urls` from submodules.
+# The armenian-ocr basenet imports it but never uses it (commented-out code).
+# We inject an empty dict so the import doesn't crash.
+# ---------------------------------------------------------------------------
+import torchvision.models.vgg as _vgg_module
+
+if not hasattr(_vgg_module, "model_urls"):
+    _vgg_module.model_urls = {}
+
+# ---------------------------------------------------------------------------
+# Add armenian-ocr to the Python path so we can import `armenian_ocr`
+# ---------------------------------------------------------------------------
+_OCR_MODULE_DIR = os.path.join(os.path.dirname(__file__), "armenian-ocr")
+if _OCR_MODULE_DIR not in sys.path:
+    sys.path.insert(0, _OCR_MODULE_DIR)
+
+from armenian_ocr import OcrWrapper  # noqa: E402
+
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
+from PIL import Image, ImageOps  # noqa: E402
+
+from llm_processor import correct_and_classify, OPENROUTER_API_KEY  # noqa: E402
+from file_export import (  # noqa: E402
     export_table_xlsx,
     export_table_csv,
     export_text_pdf,
@@ -35,175 +54,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ config
-DETECTOR_REPO = os.getenv("DETECTOR_REPO", "armvectores/yolov8n_handwritten_text_detection")
-DETECTOR_FILE = os.getenv("DETECTOR_FILE", "best.pt")
-CRNN_WEIGHTS  = os.getenv("CRNN_WEIGHTS", "crnn.pt")
+DET_MODEL_DIR = os.getenv("DET_MODEL_DIR", os.path.join(_OCR_MODULE_DIR, "detection"))
+REC_MODEL_DIR = os.getenv("REC_MODEL_DIR", os.path.join(_OCR_MODULE_DIR, "recognition"))
 API_TOKEN     = os.getenv("API_TOKEN")  # optional — leave unset for open access
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ------------------------------------------------------------------ CRNN
-# EXACT architecture from the training notebook.
-# Key differences from many online CRNN implementations:
-#   - MaxPool layers 11,17 use kernel=(2,1) — halve height only, keep width
-#   - Final conv (cnn.18) has NO padding — reduces height from 3→1
-#   - forward() applies log_softmax
-
-class BiLSTM(nn.Module):
-    def __init__(self, in_sz: int, hid_sz: int, out_sz: int):
-        super().__init__()
-        self.lstm = nn.LSTM(in_sz, hid_sz, bidirectional=True, batch_first=False)
-        self.linear = nn.Linear(hid_sz * 2, out_sz)
-
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        return self.linear(out)
-
-
-class CRNN(nn.Module):
-    """
-    Input : (B, 1, H, W)   where H = IMG_HEIGHT from checkpoint
-    Output: (T, B, num_classes),  T ≈ W/4
-    CNN height: H→H/2→H/4→H/8→H/16→1  (works for H in {48, 52, 56})
-    """
-    def __init__(self, num_classes: int, hidden_size: int = 256):
-        super().__init__()
-        self.cnn = nn.Sequential(
-            # 48→24
-            nn.Conv2d(1, 64, 3, padding=1),  nn.ReLU(True), nn.MaxPool2d(2, 2),
-            # 24→12
-            nn.Conv2d(64, 128, 3, padding=1),  nn.ReLU(True), nn.MaxPool2d(2, 2),
-            # 12→12
-            nn.Conv2d(128, 256, 3, padding=1),  nn.BatchNorm2d(256), nn.ReLU(True),
-            nn.Conv2d(256, 256, 3, padding=1),  nn.ReLU(True),
-            # 12→6
-            nn.MaxPool2d((2, 1)),
-            # 6→6
-            nn.Conv2d(256, 512, 3, padding=1),  nn.BatchNorm2d(512), nn.ReLU(True),
-            nn.Conv2d(512, 512, 3, padding=1),  nn.ReLU(True),
-            # 6→3
-            nn.MaxPool2d((2, 1)),
-            # 3→1
-            nn.Conv2d(512, 512, kernel_size=3),  nn.ReLU(True),
-        )
-        self.rnn = nn.Sequential(
-            BiLSTM(512, hidden_size, hidden_size),
-            BiLSTM(hidden_size, hidden_size, num_classes),
-        )
-
-    def forward(self, x):
-        conv = self.cnn(x)
-        b, c, h, w = conv.size()
-        assert h == 1, f"CNN height must be 1, got {h}. Check IMG_HEIGHT."
-        return F.log_softmax(
-            self.rnn(conv.squeeze(2).permute(2, 0, 1)), dim=2)
-
-
-# ------------------------------------------------------------------ load
-print("Loading detector…", flush=True)
-detector_path = hf_hub_download(repo_id=DETECTOR_REPO, filename=DETECTOR_FILE,
-                                cache_dir="/tmp/hf/hub")
-detector = YOLO(detector_path)
-
-print(f"Loading recognizer from {CRNN_WEIGHTS}…", flush=True)
-ckpt = torch.load(CRNN_WEIGHTS, map_location="cpu", weights_only=False)
-ALPHABET    = ckpt["alphabet"]                     # str or list of chars
-HIDDEN_SIZE = int(ckpt.get("hidden_size", 256))
-IMG_HEIGHT  = int(ckpt.get("img_height", 48))
-NUM_CLASSES = int(ckpt.get("num_classes", len(ALPHABET) + 1))
-
-# tokenizer: index 0 reserved for CTC blank, characters start at 1
-CHARS = list(ALPHABET) if isinstance(ALPHABET, str) else list(ALPHABET)
-IDX_TO_CHAR = {i + 1: c for i, c in enumerate(CHARS)}
-
-recognizer = CRNN(num_classes=NUM_CLASSES, hidden_size=HIDDEN_SIZE).to(DEVICE)
-recognizer.load_state_dict(ckpt["model_state_dict"])
-recognizer.eval()
-print(f"Recognizer ready · alphabet={len(CHARS)} chars · hidden={HIDDEN_SIZE} · h={IMG_HEIGHT}", flush=True)
-
-
-def ctc_greedy_decode(logits: torch.Tensor) -> str:
-    """logits: [T, 1, C] (log_softmax output) -> string."""
-    pred = logits.argmax(2).squeeze(1).cpu().tolist()
-    out, prev = [], -1
-    for p in pred:
-        if p != prev and p != 0:
-            out.append(IDX_TO_CHAR.get(p, ""))
-        prev = p
-    return "".join(out)
-
-
-def preprocess_word(img: Image.Image) -> torch.Tensor:
-    """Preprocess a word crop for CRNN recognition.
-
-    Must match the training notebook's predict_word() exactly:
-      1. Convert to RGB
-      2. Resize the RGB image to (new_w, IMG_HEIGHT)
-      3. Convert to grayscale (AFTER resize — this matters!)
-      4. Normalize to [-1, 1]
-    """
-    img = img.convert("RGB")
-    w, h = img.size
-    new_w = max(4, int(w * (IMG_HEIGHT / h)))
-    img = img.resize((new_w, IMG_HEIGHT), Image.BILINEAR)
-    # Convert to grayscale AFTER resizing (matches notebook)
-    g = img.convert("L")
-    arr = np.asarray(g, dtype=np.float32) / 255.0
-    arr = (arr - 0.5) / 0.5
-    return torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(DEVICE)
-
-
-# ------------------------------------------------------------------ detection helpers
-# The YOLO detector was trained on grayscale document scans.
-# Feeding it color photos causes false positives from grid lines, shadows, etc.
-
-def _to_grayscale_rgb(img: Image.Image) -> Image.Image:
-    """Convert to grayscale then back to 3-channel (matches YOLO training data)."""
-    gray = img.convert("L")
-    return Image.merge("RGB", [gray, gray, gray])
-
-
-def _detect_words(img: Image.Image, conf: float = 0.5):
-    """Run YOLO detection on a grayscale version of the image via temp file.
-
-    Returns (boxes_xyxy ndarray, confs ndarray).
-    If no words found at the original orientation, tries ±90° rotation.
-    """
-    def _run(pil_img):
-        gray_img = _to_grayscale_rgb(pil_img)
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp_path = tmp.name
-            gray_img.save(tmp_path, quality=95)
-        try:
-            res = detector.predict(source=tmp_path, conf=conf, verbose=False)
-        finally:
-            os.unlink(tmp_path)
-        return res[0].boxes
-
-    boxes = _run(img)
-
-    # Auto-rotation: if nothing found, try rotating ±90°
-    if len(boxes) == 0:
-        best_count, best_angle = 0, 0
-        for angle in [90, -90]:
-            rotated = img.rotate(angle, expand=True)
-            det = _run(rotated)
-            if len(det) > best_count:
-                best_count = len(det)
-                best_angle = angle
-        if best_count > 0:
-            img = img.rotate(best_angle, expand=True)
-            boxes = _run(img)
-
-    xyxy = boxes.xyxy.cpu().numpy() if len(boxes) > 0 else np.empty((0, 4))
-    confs = boxes.conf.cpu().numpy() if len(boxes) > 0 else np.empty((0,))
-    return img, xyxy, confs
-
+# ------------------------------------------------------------------ load OCR
+print("Loading armenian-ocr pipeline…", flush=True)
+ocr = OcrWrapper()
+ocr.load(det_model_dir=DET_MODEL_DIR, rec_model_dir=REC_MODEL_DIR, device=DEVICE)
+ocr.rec_wrapper.opt.workers = 0  # Force 0 workers to prevent multiprocessing crash
+print(f"OCR pipeline ready on {DEVICE}", flush=True)
 
 # ------------------------------------------------------------------ API
 app = FastAPI(
     title="Armenian Cursive OCR",
     description="Armenian cursive handwriting OCR with LLM post-processing and smart file export.",
-    version="2.0.0",
+    version="3.0.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -225,8 +92,8 @@ def health():
     return {
         "status": "ok",
         "device": DEVICE,
-        "alphabet_size": len(CHARS),
-        "img_height": IMG_HEIGHT,
+        "detector": "CRAFT",
+        "recognizer": "ResNet-BiLSTM-Attn",
         "llm_enabled": bool(OPENROUTER_API_KEY),
     }
 
@@ -240,18 +107,54 @@ def _read_image(file_bytes: bytes) -> Image.Image:
         raise HTTPException(400, f"Bad image: {e}")
 
 
+def _pil_to_np(img: Image.Image) -> np.ndarray:
+    """Convert PIL Image (RGB) to numpy array (RGB, uint8)."""
+    return np.array(img)
+
+
+def _sort_words_into_lines(items: List[dict]) -> str:
+    """Group word items into lines by vertical proximity, then join."""
+    if not items:
+        return ""
+
+    # Sort by reading order: vertical center, then horizontal position
+    items.sort(key=lambda w: (round((w["y1"] + w["y2"]) / 2 / 25), w["x1"]))
+    box_heights = [w["y2"] - w["y1"] for w in items]
+    line_tol = float(np.median(box_heights) * 1.5) if box_heights else 20.0
+
+    lines, current, current_y = [], [], None
+    for w in items:
+        cy = (w["y1"] + w["y2"]) / 2
+        if current_y is not None and abs(cy - current_y) > line_tol:
+            lines.append(" ".join(x["text"] for x in current))
+            current, current_y = [], None
+        current.append(w)
+        current_y = cy if current_y is None else current_y
+    if current:
+        lines.append(" ".join(x["text"] for x in current))
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ endpoints
+
 @app.post("/detect")
 async def detect(file: UploadFile = File(...),
                  authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
     img = _read_image(await file.read())
-    img, xyxy, confs = _detect_words(img)
-    boxes: List[dict] = []
-    for box, c in zip(xyxy, confs):
-        x1, y1, x2, y2 = [float(v) for v in box]
-        boxes.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                      "conf": float(c)})
-    return {"width": img.width, "height": img.height, "boxes": boxes}
+    np_img = _pil_to_np(img)
+    boxes = ocr.det_wrapper.predict(image=np_img)
+
+    result_boxes: List[dict] = []
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        result_boxes.append({
+            "x1": float(x1), "y1": float(y1),
+            "x2": float(x2), "y2": float(y2),
+            "conf": 1.0,
+        })
+    return {"width": img.width, "height": img.height, "boxes": result_boxes}
 
 
 @app.post("/recognize")
@@ -259,87 +162,40 @@ async def recognize(file: UploadFile = File(...),
                     authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
     img = _read_image(await file.read())
-    with torch.no_grad():
-        logits = recognizer(preprocess_word(img))
-    return {"text": ctc_greedy_decode(logits)}
+    np_img = _pil_to_np(img)
+    # Convert to grayscale for the recognition model
+    from armenian_ocr import utils
+    gray = utils.grayscale(np_img)
+    texts = ocr.rec_wrapper.predict([gray])
+    return {"text": texts[0] if texts else ""}
 
 
 @app.post("/ocr")
-async def ocr(file: UploadFile = File(...),
-              authorization: Optional[str] = Header(None)):
+async def ocr_endpoint(file: UploadFile = File(...),
+                       authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
     img = _read_image(await file.read())
-    img, xyxy, confs = _detect_words(img)
-    W, H = img.size
-
-    items = []
-    for box, c in zip(xyxy, confs):
-        x1, y1, x2, y2 = [int(v) for v in box]
-        padding = 3
-        x1c, y1c = max(0, x1 - padding), max(0, y1 - padding)
-        x2c, y2c = min(W, x2 + padding), min(H, y2 + padding)
-        crop = img.crop((x1c, y1c, x2c, y2c))
-        with torch.no_grad():
-            logits = recognizer(preprocess_word(crop))
-        items.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                      "conf": float(c),
-                      "text": ctc_greedy_decode(logits)})
-
-    # Group into lines: sort by reading order, then group by vertical proximity
-    items.sort(key=lambda w: (round((w["y1"] + w["y2"]) / 2 / 25), w["x1"]))
-    box_heights = [w["y2"] - w["y1"] for w in items]
-    line_tol = float(np.median(box_heights) * 1.5) if box_heights else 20.0
-
-    lines, current, current_y = [], [], None
-    for w in items:
-        cy = (w["y1"] + w["y2"]) / 2
-        if current_y is not None and abs(cy - current_y) > line_tol:
-            lines.append(" ".join(x["text"] for x in current))
-            current, current_y = [], None
-        current.append(w)
-        current_y = cy if current_y is None else current_y
-    if current:
-        lines.append(" ".join(x["text"] for x in current))
-
-    text = "\n".join(lines)
-    return {"text": text, "words": items}
+    result = _run_ocr_pipeline(img)
+    return result
 
 
 def _run_ocr_pipeline(img: Image.Image) -> dict:
     """Shared OCR pipeline used by /ocr, /ocr/correct, and /ocr/export."""
-    img, xyxy, confs = _detect_words(img)
-    W, H = img.size
+    np_img = _pil_to_np(img)
+    predictions = ocr.predict(image=np_img)
 
     items = []
-    for box, c in zip(xyxy, confs):
-        x1, y1, x2, y2 = [int(v) for v in box]
-        padding = 3
-        x1c, y1c = max(0, x1 - padding), max(0, y1 - padding)
-        x2c, y2c = min(W, x2 + padding), min(H, y2 + padding)
-        crop = img.crop((x1c, y1c, x2c, y2c))
-        with torch.no_grad():
-            logits = recognizer(preprocess_word(crop))
-        items.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                      "conf": float(c),
-                      "text": ctc_greedy_decode(logits)})
+    for pred in predictions:
+        box = pred["box"]
+        x1, y1, x2, y2 = box
+        items.append({
+            "x1": int(x1), "y1": int(y1),
+            "x2": int(x2), "y2": int(y2),
+            "conf": 1.0,
+            "text": pred["text"],
+        })
 
-    # Group into lines
-    items.sort(key=lambda w: (round((w["y1"] + w["y2"]) / 2 / 25), w["x1"]))
-    box_heights = [w["y2"] - w["y1"] for w in items]
-    line_tol = float(np.median(box_heights) * 1.5) if box_heights else 20.0
-
-    lines, current, current_y = [], [], None
-    for w in items:
-        cy = (w["y1"] + w["y2"]) / 2
-        if current_y is not None and abs(cy - current_y) > line_tol:
-            lines.append(" ".join(x["text"] for x in current))
-            current, current_y = [], None
-        current.append(w)
-        current_y = cy if current_y is None else current_y
-    if current:
-        lines.append(" ".join(x["text"] for x in current))
-
-    text = "\n".join(lines)
+    text = _sort_words_into_lines(items)
     return {"text": text, "words": items}
 
 

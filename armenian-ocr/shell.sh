@@ -1,0 +1,1 @@
+poetry run python3.9 ocr.py -dd detection -rd recognition -d /home/kiosk/armenian-ocr/9.jpg -o test1

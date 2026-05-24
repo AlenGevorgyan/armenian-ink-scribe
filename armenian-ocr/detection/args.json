@@ -1,0 +1,22 @@
+{
+  "trained_model": "../../webb/armocr/data_gen/models/detection/19200.pth",
+  "root_folder": "",
+  "train_folder": "../../webb/armocr/data_gen/data/mixed_data/train_data/",
+  "val_folder": "../../webb/armocr/data_gen/val/",
+  "path_to_save": "../../webb/armocr/data_gen/models/detection",
+  "low_text": 0.4,
+  "link_threshold": 0.3,
+  "low_text2": 0.6,
+  "link_threshold2": 0.6,
+  "cuda": true,
+  "canvas_size": 1280,
+  "batch_size": 64,
+  "num_workers": 11,
+  "num_iter": 7813,
+  "lr": 7.8125e-06,
+  "lr_sched_gamma": 1,
+  "lr_sched_iters": 10000,
+  "lr_sched_start": 0,
+  "iter_to_save": 150,
+  "loss_draw_interval": 10
+}

@@ -90,7 +90,7 @@ function Index() {
       <Workflow />
 
       <footer className="border-t border-border px-6 py-10 text-center text-xs text-muted-foreground">
-        Built with YOLOv8 + CRNN + LLM · Hosted on Hugging Face
+        Built with CRAFT + ResNet-Attn + LLM · Armenian OCR Pipeline
       </footer>
     </main>
   );
