@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { CursorField } from "@/components/CursorField";
 import { UploadCard } from "@/components/UploadCard";
 import { SyntheticDemo } from "@/components/SyntheticDemo";
+import { WordRecognizer } from "@/components/WordRecognizer";
 import { Workflow } from "@/components/Workflow";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -74,11 +75,13 @@ function Index() {
         </div>
 
         <Tabs defaultValue="upload" className="mx-auto w-full max-w-3xl">
-          <TabsList className="mx-auto mb-8 grid w-full max-w-xs grid-cols-2 rounded-full border border-border bg-card/40 p-1">
+          <TabsList className="mx-auto mb-8 grid w-full max-w-md grid-cols-3 rounded-full border border-border bg-card/40 p-1">
             <TabsTrigger value="upload" className="rounded-full">Upload image</TabsTrigger>
+            <TabsTrigger value="word" className="rounded-full">Single word</TabsTrigger>
             <TabsTrigger value="synthetic" className="rounded-full">Synthetic demo</TabsTrigger>
           </TabsList>
           <TabsContent value="upload"><UploadCard /></TabsContent>
+          <TabsContent value="word"><WordRecognizer /></TabsContent>
           <TabsContent value="synthetic"><SyntheticDemo /></TabsContent>
         </Tabs>
       </section>
