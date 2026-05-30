@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Upload, ImageIcon, Loader2, Download, Sparkles } from "lucide-react";
-import { ocrImage, ocrCorrect, ocrExport } from "@/lib/hf";
+import { ocrImage, ocrCorrect, ocrExport, type DetectedWord } from "@/lib/hf";
+import { OcrOverlay } from "./OcrOverlay";
 
 export function UploadCard() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -13,6 +14,7 @@ export function UploadCard() {
   const [result, setResult] = useState<string | null>(null);
   const [useLLM, setUseLLM] = useState(true);
   const [contentType, setContentType] = useState<string | null>(null);
+  const [words, setWords] = useState<DetectedWord[]>([]);
 
   const handleFile = (f: File) => {
     if (!f.type.startsWith("image/")) return;
@@ -20,6 +22,7 @@ export function UploadCard() {
     setFileName(f.name);
     setResult(null);
     setContentType(null);
+    setWords([]);
     const url = URL.createObjectURL(f);
     setPreview(url);
   };
@@ -36,14 +39,17 @@ export function UploadCard() {
     setLoading(true);
     setResult(null);
     setContentType(null);
+    setWords([]);
     try {
       if (useLLM) {
         const data = await ocrCorrect(file, file.name);
         setResult(data.corrected_text || "(no text detected)");
         setContentType(data.content_type);
+        setWords(data.words || []);
       } else {
-        const { text } = await ocrImage(file, file.name);
-        setResult(text || "(no text detected)");
+        const data = await ocrImage(file, file.name);
+        setResult(data.text || "(no text detected)");
+        setWords(data.words || []);
       }
     } catch (e: any) {
       setResult(`Error: ${e?.message ?? e}`);
@@ -148,7 +154,7 @@ export function UploadCard() {
 
           {preview && (
             <button
-              onClick={() => { setPreview(null); setFile(null); setFileName(null); setResult(null); setContentType(null); }}
+              onClick={() => { setPreview(null); setFile(null); setFileName(null); setResult(null); setContentType(null); setWords([]); }}
               className="rounded-full border border-border px-5 py-2.5 text-sm text-muted-foreground transition hover:text-foreground"
             >
               Clear
@@ -169,6 +175,10 @@ export function UploadCard() {
           </div>
           <p className="whitespace-pre-wrap text-base leading-relaxed">{result}</p>
         </div>
+      )}
+
+      {preview && words.length > 0 && (
+        <OcrOverlay imageUrl={preview} words={words} />
       )}
     </div>
   );
