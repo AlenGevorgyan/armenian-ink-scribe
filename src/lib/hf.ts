@@ -22,19 +22,35 @@ async function postImage(path: ApiPath, file: Blob, filename = "image.png") {
   return res.json();
 }
 
+// One word that the backend detected + recognized. Coordinates are in
+// pixels relative to the ORIGINAL uploaded image (not the displayed image).
+export type DetectedWord = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  conf?: number;
+  text: string;
+};
+
 export const ocrImage = (file: Blob, filename?: string) =>
-  postImage("/ocr", file, filename) as Promise<{ text: string; words: unknown[] }>;
+  postImage("/ocr", file, filename) as Promise<{
+    text: string;
+    words: DetectedWord[];
+    detector?: string;
+  }>;
 
 export const recognizeImage = (file: Blob, filename?: string) =>
   postImage("/recognize", file, filename) as Promise<{ text: string }>;
 
 export const ocrCorrect = (file: Blob, filename?: string) =>
-  postImage("/ocr/correct", file, filename) as Promise<{ 
-    raw_text: string; 
-    corrected_text: string; 
-    content_type: string; 
-    rows?: string[][]; 
-    words: unknown[];
+  postImage("/ocr/correct", file, filename) as Promise<{
+    raw_text: string;
+    corrected_text: string;
+    content_type: string;
+    rows?: string[][];
+    words: DetectedWord[];
+    detector?: string;
   }>;
 
 export async function ocrExport(file: Blob, filename?: string, format?: string, fixGrammar = true) {
